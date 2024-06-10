@@ -1,0 +1,533 @@
+# Here are all of the steps in the DL prediciton
+
+'''
+First download the right RGB & DSM Tiff file
+Then put the loaation of these files in the output and input directories
+step 1  : Make sure the both files have the same projection adn and cropped the same. 
+This make the next steps easier. 
+
+Step 2  : Load the Dsm file crop on the right extent 
+Step 3  : Assign the other values that are necesary for this eq. Crop_size
+Step 4  : use the DSM to get the coordinates of the peak maximum
+Step 5  : Load the RGB tif and crop to the same extent
+Step 6  : use the coordinates to crop the RGB file into smaller files
+Step 6.5: Train the model if necesary
+Step 7  : Load the model and use it to predict 
+Step 8  : Extract the coordiantes from the dataframe and plot the results
+'''
+#%%
+
+# Laage_vuursche DSM = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Raw_files\Laage_vuursche\Laage_vuursche_dsm.tif"
+# Laage_vuursche RGB = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Raw_files\Laage_vuursche\Laage_vuursche_RGB_reprojected.tif"
+
+# Slangenburg DSM = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Raw_files\Slangenburg\Slangenburg_DSM_v5.tif
+# Slangenburg RGB = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Raw_files\Slangenburg\Slangenburg_RGB_reprojectv1_CE
+
+# De borkel oplaat DSM = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Raw_files\De_borkel_oplaat\De_borkel_oplaat
+# De borkel oplaat RGB = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Raw_files\De_borkel_oplaat\De_borkel_oplaat\
+
+######################################################################################################################################################
+
+slang_DSM = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Raw_files\Slangenburg\Slangenburg_DSM_v5.tif"
+slang_RGB = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Raw_files\Slangenburg\Slangenburg_RGB_reprojectv1_CE"
+
+borkel_DSM = dsm_img = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Raw_files\De_borkel_oplaat\De_borkel_oplaat_DSM.tif"
+borkel_RGB = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Raw_files\De_borkel_oplaat\Correct_projection_De_borkel_oplaat_RGB.tif"
+
+vuursche_DSM = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Raw_files\Laage_vuursche\Laage_vuursche_dsm.tif"
+vuursche_RGB = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Raw_files\Laage_vuursche\Laage_vuursche_RGB_reprojected.tif"
+
+######################################################################################################################################################
+
+rgb_input = "Raw_files/De_borkel_oplaat/Correct_projection_De_borkel_oplaat_RGB.tif"
+rgb_output_dir = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Laage_vuursche_predict_img"
+dsm_input = "Raw_files/Laage_vuursche/Laage_vuursche_dsm.tif"
+csv_folder =  r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\output_images_data_laage_vuursche.csv"
+gdf_file = "TDB"
+geojsonfile = "TDB"
+img_size = 128
+
+#%%
+# All of the Imports
+import os
+from scipy import ndimage as ndi
+import matplotlib.pyplot as plt
+import skimage
+from skimage.feature import peak_local_max
+import rasterio
+import numpy as np
+import cv2
+from collections import defaultdict
+from PIL import Image
+import cv2
+import numpy as np
+import csv
+import rasterio
+import numpy as np
+import matplotlib.pyplot as plt
+import numpy as np
+from tqdm import tqdm 
+from rasterio.windows import from_bounds
+from rasterio.coords import BoundingBox
+from rasterio.warp import reproject, Resampling
+import pandas as pd
+
+#%%
+# The right extends and other stuff
+low_crop_y, high_crop_y = 5000, 7000
+low_crop_x, high_crop_x = 5000, 7000
+kernel_radius = 40
+
+#%%
+def crop_dsm_to_rgb_extent(dsm_path, rgb_path, output_path):
+    """
+    Crop the DSM image to the spatial extent of the RGB image.
+
+    Args:
+    dsm_path (str): Path to the DSM TIFF file.
+    rgb_path (str): Path to the RGB TIFF file.
+    output_path (str): Path where the cropped DSM image will be saved.
+    """
+    with rasterio.open(dsm_path) as dsm, rasterio.open(rgb_path) as rgb:
+        # Get the bounds of the RGB image
+        rgb_bounds = rgb.bounds
+
+        # Calculate the overlap between the DSM and RGB images
+        overlap_bounds = BoundingBox(
+            max(dsm.bounds.left, rgb_bounds.left),
+            max(dsm.bounds.bottom, rgb_bounds.bottom),
+            min(dsm.bounds.right, rgb_bounds.right),
+            min(dsm.bounds.top, rgb_bounds.top)
+        )
+
+        # Read the overlapping area from the DSM
+        window = from_bounds(*overlap_bounds, transform=dsm.transform)
+        dsm_crop = dsm.read(window=window)
+
+        # Adjust the transform for the new image
+        new_transform = rasterio.windows.transform(window, dsm.transform)
+
+        # Save the cropped DSM image
+        with rasterio.open(
+            output_path, 'w',
+            driver='GTiff',
+            height=dsm_crop.shape[1],
+            width=dsm_crop.shape[2],
+            count=dsm.count,
+            dtype=dsm_crop.dtype,
+            crs=dsm.crs,
+            transform=new_transform
+        ) as dst:
+            dst.write(dsm_crop)
+
+
+def reproject_rgb_to_dsm(rgb_path, dsm_path, output_path):
+    """
+    Reproject an RGB image to match the CRS and resolution of a DSM image.
+
+    Args:
+    rgb_path (str): Path to the RGB TIFF file.
+    dsm_path (str): Path to the DSM TIFF file.
+    output_path (str): Path where the reprojected RGB image will be saved.
+    """
+    with rasterio.open(dsm_path) as dsm:
+        # Extract the CRS, transform, and shape from the DSM
+        dsm_crs = dsm.crs
+        dsm_transform = dsm.transform
+        dsm_shape = dsm.shape
+
+        with rasterio.open(rgb_path) as rgb:
+            # Initialize an array to hold the reprojected RGB data
+            destination = np.zeros((rgb.count, *dsm_shape), np.uint8)
+
+            # Reproject each band of the RGB image
+            for i in range(rgb.count):
+                reproject(
+                    source=rasterio.band(rgb, i + 1),
+                    destination=destination[i],
+                    src_transform=rgb.transform,
+                    src_crs=rgb.crs,
+                    dst_transform=dsm_transform,
+                    dst_crs=dsm_crs,
+                    resampling=Resampling.nearest)
+
+            # Write the reprojected RGB data to a new file
+            with rasterio.open(
+                output_path, 'w',
+                driver='GTiff',
+                height=dsm_shape[0],
+                width=dsm_shape[1],
+                count=rgb.count,
+                dtype=rgb.dtypes[0],
+                crs=dsm_crs,
+                transform=dsm_transform
+            ) as dst:
+                dst.write(destination)
+
+def load_DSM(DSM_r_string):
+    dsm_img = cv2.imread(DSM_r_string, -1)
+    print(dsm_img.shape)
+    dsm_img[dsm_img == -10000] = dsm_img[dsm_img != -10000].min()
+    min_val = dsm_img.min()
+    max_val = dsm_img.max()
+    dsm_img_norm = (dsm_img - min_val) / (max_val - min_val) * 2**16 -  1
+    dsm_img_norm = dsm_img_norm.astype(np.uint16)
+    print(min_val)
+    print(max_val)
+    return dsm_img_norm
+
+def rescale_to_255(array, min_val=None, max_val=None):
+    """Rescale the array values to the range 0-255."""
+    if min_val is None:
+        min_val = array.min()
+    if max_val is None:
+        max_val = array.max()
+    
+    scaled_array = 255 * (array - min_val) / (max_val - min_val)
+    return scaled_array.astype(np.uint8)
+
+
+def load_RGB(RGB_r_string, low_crop_y, high_crop_y, low_crop_x, high_crop_x, output_dir):
+
+    #This cell will be the one used in the end
+    with rasterio.open(RGB_r_string) as src:
+        rgb_img = src.read()  # This loads the multi-band image into a numpy array
+
+    # Transpose the array from (bands, height, width) to (height, width, bands)
+    rgb_img = np.transpose(rgb_img, (1, 2, 0))
+
+    print("Original RGB image shape:", rgb_img.shape)
+    print("Data type:", rgb_img.dtype)
+    print("Min and Max values before scaling:", rgb_img.min(), rgb_img.max())
+
+    # Rescale each band to 0-255 if necessary
+    if rgb_img.dtype != np.uint8 or rgb_img.min() < 0 or rgb_img.max() > 255:
+        rgb_img = np.stack([rescale_to_255(rgb_img[:, :, i]) for i in range(rgb_img.shape[2])], axis=2)
+
+
+        rgb_img = rgb_img[ low_crop_y:high_crop_y, low_crop_x:high_crop_x]
+        # Output location for the images
+        #os.makedirs(output_dir, exist_ok=True)
+        return rgb_img
+
+def make_kernel(kernel_radius):
+    radius = kernel_radius
+    kernel = np.zeros((2*radius+1, 2*radius+1))
+    y,x = np.ogrid[-radius:radius+1, -radius:radius+1]
+    mask2 = x**2 + y**2 <= radius**2
+    kernel[mask2] = 1
+    return kernel
+
+# Function to crop images around a given point with a specified size
+def crop_around_point(img, x, y, size):
+    half_size = size // 2
+    return img[y - half_size:y + half_size, x - half_size:x + half_size]
+
+# Example usage of the function in a workflow
+def process_images(coordinates, dsm_img_norm, rgb_img, output_dir, csv_folder, desired_size):
+    df = pd.DataFrame(columns=["Filename", "X", "Y"])
+    for i, (x, y) in enumerate(coordinates):
+        cropped_image = crop_around_point(dsm_img_norm, x, y, desired_size)
+        cropped_RGB_image = crop_around_point(rgb_img, x, y, desired_size)
+
+        # Output paths for grayscale and RGB images
+        output_path_dsm = os.path.join(output_dir, f"cropped_image_{i + 1}_dsm.png")
+        output_path_rgb = os.path.join(output_dir, f"cropped_image_{i + 1}_rgb.png")
+
+        # Save the images if they meet the desired size and condition
+        if cropped_image.shape == (desired_size, desired_size) and cropped_RGB_image.shape == (desired_size, desired_size, 3):
+            cv2.imwrite(output_path_dsm, cropped_image)
+            cv2.imwrite(output_path_rgb, cropped_RGB_image)
+            
+            # Append data to the dataframe
+            df.loc[len(df)] = [f"cropped_image_{i + 1}_rgb.png", x, y]
+            print(f"Image {i + 1} cropped and saved: Gray - {output_path_dsm}, RGB - {output_path_rgb}")
+        else:
+            print(f"Image {i + 1} cropping failed or does not have the desired size.")
+    df.to_csv(csv_folder, index=False)
+
+#%%
+# crop_dsm_to_rgb_extent(r"C:\Users\WitteVerheul\Desktop\Laage_vuursche.tif", r"C:\Users\WitteVerheul\Desktop\Laage_vuursche_dsm.tif", r"C:\Users\WitteVerheul\Desktop\Laage_vuursche_RGB_full_crop.tif")
+# reproject_rgb_to_dsm(r"C:\Users\WitteVerheul\Desktop\Laage_vuursche_RGB_full_crop.tif", r"C:\Users\WitteVerheul\Desktop\Laage_vuursche_dsm.tif", r"C:\Users\WitteVerheul\Desktop\Laage_vuursche_RGB_reprojected.tif")
+
+#%%
+rgb_img = load_RGB(rgb_input, low_crop_y, high_crop_y, low_crop_x, high_crop_x, rgb_output_dir)
+#%%
+
+cv2.imshow("", rgb_img)
+cv2.waitKey(0)
+
+#%%
+# Load the right DSM
+dsm_img_norm = load_DSM(dsm_input)
+# Make the kernel
+#%%
+kernel = make_kernel(kernel_radius)
+#%%
+# Generate the peak maximum points
+dsm_img_norm = dsm_img_norm[low_crop_y:high_crop_y, low_crop_x:high_crop_x]
+coordinates = peak_local_max(dsm_img_norm, min_distance=50, footprint=kernel)
+#%%
+# Crop around the points
+process_images(coordinates, dsm_img_norm, rgb_img, rgb_output_dir, csv_folder, img_size)
+
+# This is the end of the pre-processing part of the prgoram, now the training part starts
+
+#%%
+from collections import defaultdict
+import tensorflow as tf
+from tensorflow.python.keras import layers, models, optimizers
+import os
+import matplotlib.pyplot as plt
+import pandas as pd
+import os
+from PIL import Image
+import numpy as np
+import matplotlib.pyplot as plt
+from keras.models import load_model
+import matplotlib.pyplot as plt
+import numpy as np
+
+#%%
+def create_model(input_shape):
+    model = models.Sequential()
+
+    # Convolutional layers
+    model.add(layers.Conv2D(32, (3, 3), activation='relu', input_shape=input_shape))
+    model.add(layers.MaxPooling2D((2, 2)))
+    model.add(layers.Conv2D(64, (3, 3), activation='relu'))
+    model.add(layers.MaxPooling2D((2, 2)))
+    model.add(layers.Conv2D(128, (3, 3), activation='relu'))
+    model.add(layers.MaxPooling2D((2, 2)))
+    model.add(layers.Conv2D(256, (3, 3), activation='relu'))
+    model.add(layers.AveragePooling2D((4,4)))
+
+    # Flatten layer
+    model.add(layers.Flatten())
+
+    # Dense layers
+    model.add(layers.Dense(512, activation='relu'))
+    model.add(layers.Dropout(0.5))
+    model.add(layers.Dense(1, activation='sigmoid'))  # Output layer with 1 neuron for binary classification
+
+
+    return model
+
+height = img_size
+width = img_size
+channels = 3
+input_shape = (height, width, channels)
+
+#%%
+# Create the model
+model = create_model(input_shape)
+
+optimizer = optimizers.adam_v2.Adam(1e-4)
+# Compile the model
+model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['accuracy'])
+
+# Display the model summary
+model.summary()
+#%%
+
+# Batch size
+batch_size = 32
+
+# Define data directories
+train_dir = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\3d_training\train"
+
+# Define the size of your images
+img_height, img_width = height, width  # Replace these with the actual height and width
+
+# Create a dataset
+train_dataset = tf.keras.utils.image_dataset_from_directory(
+    train_dir,
+    labels='inferred',  
+    label_mode='int',  
+    batch_size=batch_size,
+    image_size=(img_height, img_width),
+    shuffle=True)   
+test_dir = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\3d_training\test"
+
+# Assuming you have a test dataset
+test_dataset = tf.keras.utils.image_dataset_from_directory(
+    test_dir,  
+    label_mode='int',  # or 'binary' or 'categorical' depending on your use case
+    batch_size=batch_size,
+    image_size=(img_height, img_width),
+    shuffle=False
+
+)
+
+
+# Define data augmentation
+data_augmentation = tf.keras.Sequential([
+    tf.keras.layers.Rescaling(1./255),  # Normalize the images
+    # tf.keras.layers.RandomRotation(0.2),  # Rotation
+    # tf.keras.layers.RandomZoom(0.2),  # Zoom
+    tf.keras.layers.RandomFlip("horizontal"),  # Horizontal flip
+    # tf.keras.layers.RandomTranslation(width_factor=0.2, height_factor=0.2)  # Width and height shift
+])
+
+scaling = tf.keras.layers.Rescaling(1./255)
+
+# Apply data augmentation to the dataset
+augmented_train_dataset = train_dataset.map(lambda x, y: (data_augmentation(x, training=True), y))
+normalized_val_dataset = test_dataset.map(lambda x, y: (scaling(x), y))
+# Train the model
+history = model.fit(augmented_train_dataset, epochs=100, validation_data=normalized_val_dataset)
+ 
+plt.figure(figsize=(10, 5))
+plt.subplot(1, 2, 1)
+plt.plot(history.history['accuracy'], label='Training Accuracy')
+plt.title('Training Accuracy')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend()
+
+# Plot training loss
+plt.subplot(1, 2, 2)
+plt.plot(history.history['loss'], label='Training Loss')
+plt.title('Training Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+
+plt.tight_layout()
+plt.show()
+
+#%%
+# Load your pre-trained model
+model = load_model("Models/RGB_model_v2_128px.keras")
+
+def load_and_preprocess_image(img_path):
+    """Load an image file and prepare it for model prediction using Pillow."""
+    img = Image.open(img_path)  # Open the image file
+    img = img.resize((img_size, img_size))  # Resize the image to the target size
+    img_array = np.array(img)  # Convert the image to a numpy array
+    img_array = np.expand_dims(img_array, axis=0)  # Add batch dimension
+    return img_array
+
+def predict_folder(folder_path):
+    """Predict the class of images in a folder that have 'RGB' in their filenames."""
+    predictions = []
+    
+    for filename in os.listdir(folder_path):
+        if 'RGB' in filename or 'rgb' in filename:  # Case insensitive check
+            full_path = os.path.join(folder_path, filename)
+            img_array = load_and_preprocess_image(full_path)
+            prediction = model.predict(img_array)
+            prediction = int(prediction)  # Convert prediction to an integer (if necessary)
+            predictions.append({'Number': filename, 'Prediction': prediction})
+            print(f"File: {filename}, Predicted class: {prediction}")
+    predictions_df = pd.DataFrame(predictions)
+    return predictions_df
+
+# Load the CSV file
+folder_path = rgb_output_dir
+predictions = predict_folder(folder_path)
+
+
+csv_path = csv_folder
+
+# Load the CSV file
+df = pd.read_csv(csv_path)
+df['Filename'] = df['Filename'].astype(str)
+# Define the full path for the filtered CSV
+#filtered_csv_path = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Filtered_points.csv"
+
+# Save the filtered data to a new CSV file
+
+filtered = predictions[predictions['Prediction'] != 1]
+result = pd.merge(df, predictions, left_on='Filename', right_on='Number')
+result_filtered = result[result['Prediction'] != 1]
+
+
+#print(f"Filtered data has been saved to {filtered_csv_path}.")
+
+
+#%%
+# Load the CSV data into a DataFrame
+#df = pd.read_csv(r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Filtered_points.csv")
+
+# Extract coordinates into a list of tuples (X,Y)
+coordinates = list(result_filtered[['X', 'Y']].itertuples(index=False, name=None))
+fig, ax = plt.subplots(1, 2, figsize=(20, 10), sharex=True, sharey=True)
+coordinates = np.array(coordinates)
+
+
+# Original RGB image
+ax[0].imshow(rgb_img)
+ax[0].axis('off')
+ax[0].set_title('Original RGB Image')
+
+# DSM image with detected peaks
+ax[1].imshow(dsm_img_norm, cmap=plt.cm.gray)
+ax[1].autoscale(False)
+ax[1].scatter(result_filtered['X'], result_filtered['Y'], c='red', s=10)  # Original points
+ax[1].axis('off')
+ax[1].set_title('Original Detected Peaks on DSM Image')
+
+# RGB image with filtered peaks
+ax[2].imshow(rgb_img)
+ax[2].autoscale(False)
+ax[2].scatter(result['X'], result['Y'], c='red', s=10)  # Filtered points
+ax[2].axis('off')
+ax[2].set_title('Filtered Peaks on RGB Image')
+
+fig.tight_layout()
+plt.show()
+
+
+
+
+df = result_filtered
+#%%
+# Constants for the offset
+X_OFFSET = 6000
+Y_OFFSET = 6000
+#%%
+# Adjust the coordinates
+df['Original_X'] = df['X'] + X_OFFSET
+df['Original_Y'] = df['Y'] + Y_OFFSET
+
+#%%
+import geopandas as gpd
+from shapely.geometry import Point
+import rasterio
+import pandas as pd
+
+result_filtered['Original_X'] = result_filtered['X'] + X_OFFSET
+result_filtered['Original_Y'] = result_filtered['Y'] + Y_OFFSET
+
+# Load RGB image to determine the original dimensions, cropping offsets, and CRS
+rgb_path_for_points = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Raw_files\De_borkel_oplaat\Correct_projection_De_borkel_oplaat_RGB.tif"
+with rasterio.open(rgb_path_for_points) as src:
+    width, height = src.width, src.height
+    crs = src.crs  # CRS from the original image
+    transform_matrix = src.transform
+
+    # Function to transform local coordinates to global coordinates
+    def transform_coordinates(row, transform):
+        global_x, global_y = rasterio.transform.xy(transform, row['Original_Y'], row['Original_X'], offset='center')
+        return pd.Series({'Global_X': global_x, 'Global_Y': global_y})
+
+    # Apply the transformation function to each row
+    transformed_coords = result_filtered.apply(transform_coordinates, axis=1, transform=transform_matrix)
+    result_filtered['Global_X'] = transformed_coords['Global_X']
+    result_filtered['Global_Y'] = transformed_coords['Global_Y']
+
+    # Create a GeoDataFrame using the global coordinates
+    gdf = gpd.GeoDataFrame(
+        result_filtered,
+        geometry=gpd.points_from_xy(result_filtered['Global_X'], result_filtered['Global_Y']),
+        crs=crs  # Use the CRS directly from the loaded RGB image
+    )
+
+    # Save the GeoDataFrame as a Shapefile and GeoJSON
+    output_path = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Processed_files"
+    gdf.to_file(f"{output_path}\output_points_v1_vuursche.shp")
+    gdf.to_file(f"{output_path}\output_points_v1_vuursche.geojson", driver='GeoJSON')
+
+print(f"Filtered data has been saved to {output_path}.")
+#%%
