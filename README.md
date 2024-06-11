@@ -103,4 +103,5 @@ This project involves the development and implementation of a machine learning m
 - **Expand Use Cases**: Adapt the model for other forestry management tasks like detecting diseased or dead trees.
 
 For any issues or contributions, please refer to the GitHub repository [here](https://github.com/Wittedewit/Peak_maximum.git).
+![image](https://github.com/Wittedewit/Peak_maximum/assets/105919559/a60a2a31-6339-4fc5-8d77-25c266ee8a8a)
 
