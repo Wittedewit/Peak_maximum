@@ -73,6 +73,9 @@ This project involves the development and implementation of a machine learning m
 - **create_model**: Constructs and compiles the machine learning model.
 - **predict_folder**: Predicts the class of images in a folder, focusing on those with 'RGB' in their filenames.
 
+![Local_maxima_slangenburg](https://github.com/Wittedewit/Peak_maximum/assets/105919559/0901dd3c-0ce8-4fa8-9292-be3df0b9d899)
+
+
 ## Usage Example
 
 1. **Preprocess Data**:
