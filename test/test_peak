@@ -1,0 +1,727 @@
+# %%
+#1
+import os
+from scipy import ndimage as ndi
+import matplotlib.pyplot as plt
+from skimage.feature import peak_local_max
+import rasterio
+import numpy as np
+import cv2
+from collections import defaultdict
+from PIL import Image
+import cv2
+import numpy as np
+from tqdm import tqdm 
+from rasterio.windows import from_bounds
+from rasterio.coords import BoundingBox
+from rasterio.warp import reproject, Resampling
+
+# %%
+#2
+def crop_around_point(image, x, y, crop_size=256):
+    half_size = crop_size // 2
+    left = max(0, x - half_size)
+    upper = max(0, y - half_size)
+    right = min(image.shape[1], x + half_size)
+    lower = min(image.shape[0], y + half_size)
+
+    # Perform boundary checks to ensure valid cropping region
+    if left >= right or upper >= lower:
+        return None  # Return None for invalid cropping region
+
+    return image[upper:lower, left:right]
+
+def process_crop(img_crop, kernel):
+    """
+    Apply maximum and Gaussian filters to the crop.
+    """
+    # Check if all pixels have the same value
+    if img_crop.max() == img_crop.min():
+        #print("Skipping crop as all pixels are the same.")
+        return np.array([])  # Return an empty array if all pixels are the same
+
+    #image_max = ndi.maximum_filter(img_crop, footprint=kernel, mode='constant')
+    coordinates = peak_local_max(img_crop, footprint=kernel)
+    return coordinates
+
+def crop_and_save_images(coordinates, img, rgb_img, crop_size, output_dir, offset_x, offset_y):
+    """
+    Crop around the coordinates and save the images.
+    """
+    for i, (px, py) in enumerate(coordinates):
+        global_px = px + offset_x
+        global_py = py + offset_y
+
+        cropped_image = crop_around_point(img, global_px, global_py, crop_size)
+        cropped_RGB_image = crop_around_point(rgb_img, global_px, global_py, crop_size)
+
+        if cropped_image is not None and cropped_RGB_image is not None:
+            if cropped_image.shape[0] == crop_size and cropped_image.shape[1] == crop_size:
+                output_path_dsm = os.path.join(output_dir, f"cropped_image_{i + 1}_dsm.png")
+                output_path_rgb = os.path.join(output_dir, f"cropped_image_{i + 1}_rgb.png")
+
+                cv2.imwrite(output_path_dsm, cropped_image)
+                cv2.imwrite(output_path_rgb, cropped_RGB_image)
+                print(f"Image {i + 1} cropped and saved: Gray - {output_path_dsm}, RGB - {output_path_rgb}")
+            else:
+                print(f"Image {i + 1} cropping failed or does not have the desired size.")
+        else:
+            print(f"Skipping crop at ({global_px}, {global_py}) due to invalid cropping region.")
+
+def process_image_in_crops(dsm_img_norm, rgb_img, crop_size, stride, kernel, output_dir):
+    """
+    Process the image in crops, apply filters, detect peaks, and save the cropped images.
+
+    Args:
+    dsm_img_norm (numpy.ndarray): Normalized DSM image to process.
+    rgb_img (numpy.ndarray): RGB image for corresponding cropping.
+    crop_size (int): The size of the crop.
+    stride (int): The stride with which the image is cropped.
+    kernel (numpy.ndarray): The kernel used for filtering.
+    output_dir (str): The directory where output images are saved.
+    """
+    for y in tqdm(range(0, dsm_img_norm.shape[0], stride), desc="Rows"):
+        for x in tqdm(range(0, dsm_img_norm.shape[1], stride), desc="Columns", leave=False):
+            img_crop = dsm_img_norm[y:y+crop_size, x:x+crop_size]
+            rgb_img_crop = rgb_img[y:y+crop_size, x:x+crop_size]
+
+            if img_crop.shape[0] != crop_size or img_crop.shape[1] != crop_size:
+                print(f"Skipping crop at ({x}, {y}) due to mismatched size.")
+                continue
+
+            coordinates = process_crop(img_crop, kernel)
+            if coordinates.size > 0:
+                crop_and_save_images(coordinates, img_crop, rgb_img_crop, crop_size, output_dir, x, y)
+            else:
+                print(f"No valid peaks found in the crop at ({x}, {y}).")
+
+
+def merge_images_in_directory(input_dir, folder_path):
+    """
+    Merges RGB and grayscale images in the specified directory into combined images.
+
+    Args:
+    folder_path (str): The path to the folder containing the images to be merged.
+    """
+    images_dict = defaultdict(dict)
+
+    # Iterate through the files in the directory
+    for filename in os.listdir(input_dir):
+        if filename.startswith('cropped_image_') and filename.endswith('.png'):
+            # Extract the number and the type (rgb or q) from the filename
+            parts = filename.split('_')
+            number = parts[2]
+            image_type = parts[3].split('.')[0]  # 'rgb' or 'q'
+
+            # Store the filename in the dictionary
+            images_dict[number][image_type] = os.path.join(input_dir, filename)
+
+    # Iterate through the dictionary and merge the images
+    for number, paths in images_dict.items():
+        if 'rgb' in paths and 'q' in paths:
+            rgb_image = cv2.imread(paths['rgb'], cv2.IMREAD_COLOR)
+            q_image = cv2.imread(paths['q'], cv2.IMREAD_GRAYSCALE)
+
+            if rgb_image is not None and q_image is not None:
+                # Combine the RGB and grayscale images into a single image
+                combined_image = np.dstack((rgb_image, q_image))
+                combined_filename = f'cropped_image_{number}_combined.png'
+                cv2.imwrite(os.path.join(folder_path, combined_filename), combined_image)
+                print(f"Saved combined image {combined_filename}")
+            else:
+                print(f"Could not load images for number {number}.")
+        else:
+            print(f"RGB or Q image missing for number {number}.")
+
+def crop_dsm_to_rgb_extent(dsm_path, rgb_path, output_path):
+    """
+    Crop the DSM image to the spatial extent of the RGB image.
+
+    Args:
+    dsm_path (str): Path to the DSM TIFF file.
+    rgb_path (str): Path to the RGB TIFF file.
+    output_path (str): Path where the cropped DSM image will be saved.
+    """
+    with rasterio.open(dsm_path) as dsm, rasterio.open(rgb_path) as rgb:
+        # Get the bounds of the RGB image
+        rgb_bounds = rgb.bounds
+
+        # Calculate the overlap between the DSM and RGB images
+        overlap_bounds = BoundingBox(
+            max(dsm.bounds.left, rgb_bounds.left),
+            max(dsm.bounds.bottom, rgb_bounds.bottom),
+            min(dsm.bounds.right, rgb_bounds.right),
+            min(dsm.bounds.top, rgb_bounds.top)
+        )
+
+        # Read the overlapping area from the DSM
+        window = from_bounds(*overlap_bounds, transform=dsm.transform)
+        dsm_crop = dsm.read(window=window)
+
+        # Adjust the transform for the new image
+        new_transform = rasterio.windows.transform(window, dsm.transform)
+
+        # Save the cropped DSM image
+        with rasterio.open(
+            output_path, 'w',
+            driver='GTiff',
+            height=dsm_crop.shape[1],
+            width=dsm_crop.shape[2],
+            count=dsm.count,
+            dtype=dsm_crop.dtype,
+            crs=dsm.crs,
+            transform=new_transform
+        ) as dst:
+            dst.write(dsm_crop)
+
+
+def reproject_rgb_to_dsm(rgb_path, dsm_path, output_path):
+    """
+    Reproject an RGB image to match the CRS and resolution of a DSM image.
+
+    Args:
+    rgb_path (str): Path to the RGB TIFF file.
+    dsm_path (str): Path to the DSM TIFF file.
+    output_path (str): Path where the reprojected RGB image will be saved.
+    """
+    with rasterio.open(dsm_path) as dsm:
+        # Extract the CRS, transform, and shape from the DSM
+        dsm_crs = dsm.crs
+        dsm_transform = dsm.transform
+        dsm_shape = dsm.shape
+
+        with rasterio.open(rgb_path) as rgb:
+            # Initialize an array to hold the reprojected RGB data
+            destination = np.zeros((rgb.count, *dsm_shape), np.uint8)
+
+            # Reproject each band of the RGB image
+            for i in range(rgb.count):
+                reproject(
+                    source=rasterio.band(rgb, i + 1),
+                    destination=destination[i],
+                    src_transform=rgb.transform,
+                    src_crs=rgb.crs,
+                    dst_transform=dsm_transform,
+                    dst_crs=dsm_crs,
+                    resampling=Resampling.nearest)
+
+            # Write the reprojected RGB data to a new file
+            with rasterio.open(
+                output_path, 'w',
+                driver='GTiff',
+                height=dsm_shape[0],
+                width=dsm_shape[1],
+                count=rgb.count,
+                dtype=rgb.dtypes[0],
+                crs=dsm_crs,
+                transform=dsm_transform
+            ) as dst:
+                dst.write(destination)
+
+
+# Example usage:
+# reproject_rgb_to_dsm('path/to/rgb.tif', 'path/to/dsm.tif', 'path/to/output_rgb.tif')
+
+#%%
+crop_dsm_to_rgb_extent(r"C:\Users\WitteVerheul\Desktop\Laage_vuursche.tif", r"C:\Users\WitteVerheul\Desktop\Laage_vuursche_dsm.tif", r"C:\Users\WitteVerheul\Desktop\Laage_vuursche_RGB_full_crop.tif")
+
+#%%
+reproject_rgb_to_dsm(r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Raw_files\Slangenburg\Slangenburg_DSM_v1.tif", r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Raw_files\Slangenburg\Slangenburg_RGB_v1.tif" , r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Raw_files\Slangenburg\Correct_projection_slangenburg_DSM_v1.tif")
+#%%
+#3
+
+dsm_img = cv2.imread("C:/Users/WitteVerheul/Desktop/Slangenburg_DSM_v1.tif", -1)
+print(dsm_img.shape)
+dsm_img[dsm_img == -10000] = dsm_img[dsm_img != -10000].min()
+min_val = dsm_img.min()
+max_val = dsm_img.max()
+dsm_img_norm = (dsm_img - min_val) / (max_val - min_val) * 2**16 -  1
+dsm_img_norm = dsm_img_norm.astype(np.uint16)
+
+dsm_img_norm = dsm_img_norm[10000:11000, 10000:12000]
+radius = 40
+kernel = np.zeros((2*radius+1, 2*radius+1))
+y,x = np.ogrid[-radius:radius+1, -radius:radius+1]
+mask2 = x**2 + y**2 <= radius**2
+kernel[mask2] = 1
+
+print(min_val)
+print(max_val)
+
+#%%
+#4
+# Parameters for cropping
+crop_size = 256
+stride = 1000  # The step size for the crop, set equal to crop_size for non-overlapping crops
+
+#Open the RGB image into memory
+with rasterio.open(r"C:\Users\WitteVerheul\Desktop\Slangenburg_DSM_reprojectv1_CE.tif") as src:
+    rgb_img = src.read()  # This loads the multi-band image into a numpy array
+# Transpose the array from (bands, height, width) to (height, width, bands)
+rgb_img = np.transpose(rgb_img, (1, 2, 0))
+print("RGB image shape:", rgb_img.shape)
+
+#img_crop_rgb = rgb_img[10000:11000, 10000:12000]
+# Output location for the images
+output_dir = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset"
+os.makedirs(output_dir, exist_ok=True)
+rgb_img = rgb_img[10000:11000, 10000:12000]
+
+#%%
+#5
+process_image_in_crops(dsm_img_norm, rgb_img, crop_size, stride, kernel, output_dir)
+#%%
+#6
+output_dir_merge = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Training_data_4channel"
+merge_images_in_directory(output_dir, output_dir_merge)
+
+
+#TEST SECTION
+
+# Laage_vuursche DSM = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Raw_files\Laage_vuursche\Laage_vuursche_dsm.tif"
+# Laage_vuursche RGB = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Raw_files\Laage_vuursche\Laage_vuursche_RGB_reprojected.tif"
+
+# Slangenburg DSM = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Raw_files\Slangenburg\Slangenburg_DSM_v5.tif
+# Slangenburg RGB = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Raw_files\Slangenburg\Slangenburg_RGB_reprojectv1_CE
+
+# De borkel oplaat RGB = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Raw_files\De_borkel_oplaat\De_borkel_oplaat_RGB.tif
+# De borkel oplaat DSM = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Raw_files\De_borkel_oplaat\De_borkel_oplaat_DSM.tif
+
+
+# %%
+import os
+from scipy import ndimage as ndi
+import matplotlib.pyplot as plt
+import skimage
+from skimage.feature import peak_local_max
+import rasterio
+import numpy as np
+import cv2
+from collections import defaultdict
+from PIL import Image
+import cv2
+import numpy as np
+import csv
+import rasterio
+import numpy as np
+import matplotlib.pyplot as plt
+# %%
+dsm_img = cv2.imread(r"Raw_files/De_borkel_oplaat/De_borkel_oplaat_DSM.tif", -1)
+print(dsm_img.shape)
+dsm_img[dsm_img == -10000] = dsm_img[dsm_img != -10000].min()
+min_val = dsm_img.min()
+max_val = dsm_img.max()
+dsm_img_norm = (dsm_img - min_val) / (max_val - min_val) * 2**16 -  1
+dsm_img_norm = dsm_img_norm.astype(np.uint16)
+
+print(min_val)
+print(max_val)
+# %%
+
+cv2.imshow("", dsm_img_norm[8000:12000, 8000:12000])
+cv2.waitKey(0)
+
+#im = Image.open('Z:/Clients/Skogran/Demo_Finland2023/Orthomosaic/20230608-ClearTimber-Analytics-Online_planning_1686302203--dsm-zip.tif')
+#im.show()
+
+# %%
+#[7000:13000, 7000:13000] 2nd slangenburg
+#[9000:15000, 7000:13000] nieuwe test slangenbrug
+# Final test data Slangenburg = [8000:14000, 12000:18000]
+#[9000:15000, 7000:13000]) =  de borkel oplaat
+# Predict Image borkel Oplaat = [6000:9000, 6000:9000]
+#bomentest borkelOplaat [8500:11500, 4000:6000]
+dsm_img_norm = dsm_img_norm[8500:11500, 4000:6000]
+radius = 30
+kernel = np.zeros((2*radius+1, 2*radius+1))
+y,x = np.ogrid[-radius:radius+1, -radius:radius+1]
+mask2 = x**2 + y**2 <= radius**2
+kernel[mask2] = 1
+
+#%%
+# image_max is the dilation of im with a 20*20 structuring element
+# It is used within peak_local_max function
+#image_max = ndi.maximum_filter(dsm_img_norm, footprint=kernel, mode='constant')
+#%%
+# Gaussian Filter for better results
+#image_gaus = ndi.gaussian_filter(image_max, sigma=0.5, mode='constant')
+
+# Comparison between image_max and im to find the coordinates of local maxima
+coordinates = peak_local_max(dsm_img_norm, min_distance=50, footprint=kernel)
+
+
+# %%
+# Crop and save images
+def crop_around_point(image, x, y, crop_size=256):
+    half_size = crop_size // 2
+    left = max(0, x - half_size)
+    upper = max(0, y - half_size)
+    right = min(image.shape[1], x + half_size)
+    lower = min(image.shape[0], y + half_size)
+
+    # Perform boundary checks to ensure valid cropping region
+    if left >= right or upper >= lower:
+        return None  # Return None for invalid cropping region
+
+    return image[upper:lower, left:right]
+
+#%%
+
+
+def rescale_to_255(array, min_val=None, max_val=None):
+    """Rescale the array values to the range 0-255."""
+    if min_val is None:
+        min_val = array.min()
+    if max_val is None:
+        max_val = array.max()
+    
+    scaled_array = 255 * (array - min_val) / (max_val - min_val)
+    return scaled_array.astype(np.uint8)
+
+#This cell will be the one used in the end
+#%%
+with rasterio.open("Raw_files/De_borkel_oplaat/Correct_projection_De_borkel_oplaat_RGB.tif") as src:
+    rgb_img = src.read()  # This loads the multi-band image into a numpy array
+
+# Transpose the array from (bands, height, width) to (height, width, bands)
+rgb_img = np.transpose(rgb_img, (1, 2, 0))
+rgb_img = rgb_img[8500:11500, 4000:6000]
+
+print("Original RGB image shape:", rgb_img.shape)
+print("Data type:", rgb_img.dtype)
+print("Min and Max values before scaling:", rgb_img.min(), rgb_img.max())
+
+# Rescale each band to 0-255 if necessary
+if rgb_img.dtype != np.uint8 or rgb_img.min() < 0 or rgb_img.max() > 255:
+    rgb_img = np.stack([rescale_to_255(rgb_img[:, :, i]) for i in range(rgb_img.shape[2])], axis=2)
+
+
+#%%
+rgb_img = rgb_img[10000:13000, 11000:14000]
+# Output location for the images
+
+#[6000:9000, 6000:9000]
+ #%%
+cv2.imshow("", rgb_img)
+cv2.waitKey(0)
+
+#%%
+
+output_dir = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Borkel_oplaat_bomen_predict"
+
+os.makedirs(output_dir, exist_ok=True)
+
+
+#%%
+# display results
+fig, axes = plt.subplots(3, 1, figsize=(50, 20), sharex=True, sharey=True)
+ax = axes.ravel()
+ax[0].imshow(rgb_img, cmap=plt.cm.gray)
+ax[0].axis('off')
+ax[0].set_title('Original')
+
+ax[1].imshow(dsm_img_norm, cmap=plt.cm.gray)
+ax[1].axis('off')
+ax[1].set_title('Maximum')
+
+ax[2].imshow(rgb_img, cmap=plt.cm.gray)
+ax[2].autoscale(False)
+#ax[2].plot(coordinates[:, 1], coordinates[:, 0], 'r.')
+ax[2].axis('off')
+ax[2].set_title('Peak local max')
+
+fig.tight_layout()
+
+plt.show()
+
+#%%
+#New crop function with poitns
+import os
+import cv2
+import numpy as np
+import pandas as pd
+from PIL import Image
+
+# Initialize a DataFrame to store image data
+df = pd.DataFrame(columns=["Filename", "X", "Y"])
+
+# Function to crop images around a given point with a specified size
+def crop_around_point(img, x, y, size):
+    half_size = size // 2
+    return img[y - half_size:y + half_size, x - half_size:x + half_size]
+
+# Example usage of the function in a workflow
+def process_images(coordinates, dsm_img_norm, rgb_img, output_dir):
+    desired_size = 256
+    for i, (x, y) in enumerate(coordinates):
+        cropped_image = crop_around_point(dsm_img_norm, x, y, desired_size)
+        cropped_RGB_image = crop_around_point(rgb_img, x, y, desired_size)
+
+        # Output paths for grayscale and RGB images
+        output_path_dsm = os.path.join(output_dir, f"cropped_image_{i + 1}_dsm.png")
+        output_path_rgb = os.path.join(output_dir, f"cropped_image_{i + 1}_rgb.png")
+
+        # Save the images if they meet the desired size and condition
+        if cropped_image.shape == (desired_size, desired_size) and cropped_RGB_image.shape == (desired_size, desired_size, 3):
+            cv2.imwrite(output_path_dsm, cropped_image)
+            cv2.imwrite(output_path_rgb, cropped_RGB_image)
+            
+            # Append data to the dataframe
+            df.loc[len(df)] = [f"cropped_image_{i + 1}_rgb.png", x, y]
+            print(f"Image {i + 1} cropped and saved: Gray - {output_path_dsm}, RGB - {output_path_rgb}")
+        else:
+            print(f"Image {i + 1} cropping failed or does not have the desired size.")
+
+# Assuming the `coordinates`, `dsm_img_norm`, `rgb_img`, and `output_dir` are defined, call the function:
+output_dir = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Borkel_oplaat_bomen_predict"
+
+process_images(coordinates, dsm_img_norm, rgb_img, output_dir)
+
+# Now, df holds all the information about the cropped images
+print(df)
+#%%
+# Optionally, save the dataframe to a CSV file for further use
+df.to_csv(r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\output_images_Borkeloplaat_boom.csv", index=False)
+
+#%%
+desired_size = 256  # Set the desired size
+
+####  NORMALIZE DSM PER CROP??
+for i, (x, y) in enumerate(coordinates):
+
+    cropped_image = crop_around_point(dsm_img_norm, x, y, desired_size)
+    cropped_RGB_image = crop_around_point(rgb_img, x, y, desired_size)
+
+
+    # Ensure the cropped RGB image has 3 bands
+    if cropped_RGB_image is not None and len(cropped_RGB_image.shape) == 3 and cropped_RGB_image.shape[2] == 3:
+        print(f"Cropped RGB image {i + 1} has 3 bands.")
+    else:
+        print(f"Cropped RGB image {i + 1} does not have 3 bands. Check the cropping operation.")
+
+    # Save the cropped RGB imag
+    # Check if cropping was successful and the size is as desired
+    if (
+        cropped_image is not None
+        and cropped_RGB_image is not None
+        and cropped_image.shape[0] == desired_size
+        and cropped_image.shape[1] == desired_size
+    ):
+       
+        # Output paths for grayscale and RGB images
+        output_path_dsm = os.path.join(output_dir, f"bp_cropped_image_{i + 1}_dsm.png")
+        cv2.imwrite(output_path_dsm, cropped_image)
+
+        output_path_rgb = os.path.join(output_dir, f"bp_cropped_image_{i + 1}_rgb.png")
+
+        # Save the cropped grayscale image
+        cv2.imwrite(output_path_dsm, cropped_image)
+
+        # Save the cropped RGB image
+        cv2.imwrite(output_path_rgb, cropped_RGB_image)
+        
+        # Read back the saved image and check for 3 bands
+        saved_image = cv2.imread(output_path_rgb, cv2.IMREAD_UNCHANGED)
+
+        if saved_image is not None and len(saved_image.shape) == 3 and saved_image.shape[2] == 3:
+            print(f"Saved RGB image {i + 1} has 3 bands and is read correctly.")
+        else:
+            print(f"Saved RGB image {i + 1} does not have 3 bands when read. Check the saving operation.")
+
+
+        print(f"Image {i + 1} cropped and saved: Gray - {output_path_dsm}, RGB - {output_path_rgb}")
+    else:
+        print(f"Image {i + 1} cropping failed or does not have the desired size.")
+
+#%%
+
+def generate_points_list(folder_path):
+    points_list = []
+    # Scan through the folder to find image files and extract their indices and types
+    for filename in os.listdir(folder_path):
+        if filename.startswith('cropped_image_') and filename.endswith('.png'):
+            # Extract the index from the filename
+            parts = filename.split('_')
+            index = parts[2]  # This is the unique number for each image
+            points_list.append((index, filename))
+    return points_list
+
+def export_points_to_csv(points_list, output_csv_path):
+    """
+    Export points to a CSV file.
+    
+    :param points_list: List of tuples, where each tuple contains information about a point.
+    :param output_csv_path: Path to save the CSV file.
+    """
+    # Open the file in write mode
+    with open(output_csv_path, 'w', newline='') as file:
+        writer = csv.writer(file)
+        
+        # Write the header row, if necessary
+        writer.writerow(['Index', 'Filename'])  # Optional, adjust based on your actual data structure
+        
+        # Write data rows
+        for point in points_list:
+            writer.writerow(point)
+
+# Example usage
+folder_path = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Borkel_oplaat_bomen_predict"  # Specify folder path where the images are saved
+points_list = generate_points_list(folder_path) 
+output_csv_path = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\output_images_Borkeloplaat_boom.csv"  # Define where to save CSV
+
+export_points_to_csv(points_list, output_csv_path)
+print(f"Points have been exported to {output_csv_path}.")
+
+
+#%%
+# A dictionary to hold the filenames grouped by their numbers
+images_dict = defaultdict(dict)
+
+def combine_images_and_save(folder_path, channel_4_folder):
+    # A dictionary to hold the filenames grouped by their numbers
+    images_dict = defaultdict(dict)
+
+    # Iterate through the files in the directory
+    for filename in os.listdir(folder_path):
+        if filename.startswith('cropped_image_') and filename.endswith('.png'):
+            # Extract the number and the type (rgb or q) from the filename
+            parts = filename.split('_')
+            number = parts[2]
+            image_type = parts[3].split('.')[0]  # 'rgb' or 'dsm'
+
+            # Store the filename in the dictionary
+            images_dict[number][image_type] = os.path.join(folder_path, filename)
+
+    # Iterate through the dictionary and merge the images
+    for number, paths in images_dict.items():
+        if 'rgb' in paths and 'dsm' in paths:  # Assuming 'dsm' denotes the DSM images
+            rgb_image = cv2.imread(paths['rgb'], cv2.IMREAD_COLOR)
+            dsm_image = cv2.imread(paths['dsm'], cv2.IMREAD_GRAYSCALE)
+
+            # Check if both images are loaded successfully
+            if rgb_image is not None and dsm_image is not None:
+                # Ensure the DSM image has the same dimensions as the RGB image
+                dsm_image_resized = cv2.resize(dsm_image, (rgb_image.shape[1], rgb_image.shape[0]))
+
+                # Combine the RGB and DSM images into a single 4-channel image
+                combined_image = np.dstack((rgb_image, dsm_image_resized))
+                combined_filename = f'cropped_image_{number}_combined.tif'
+                cv2.imwrite(os.path.join(channel_4_folder, combined_filename), combined_image)
+                print(f"Saved combined image {combined_filename}")
+            else:
+                print(f"Could not load images for number {number}.")
+        else:
+            print(f"RGB or DSM image missing for number {number}.")
+
+# Example usage
+folder_path = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\rgb_dsm"
+channel_4_folder = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\4d_training\train"
+combine_images_and_save(folder_path, channel_4_folder)
+
+
+#%%
+
+import cv2
+from collections import defaultdict
+import os
+from tqdm import tqdm
+import re
+import numpy as np
+
+# Define the pattern to extract the numeric identifier from the filenames
+pattern = r"\d+"
+
+def combine_and_delete_images(folder_path):
+    for sub_dir in ["train", "test"]:
+        for class_folder in ["class_1", "class_2"]:
+            path = os.path.join(folder_path, sub_dir, class_folder)
+            images_dict = defaultdict(dict)
+
+            for filename in tqdm(os.listdir(path), desc=f"Processing {sub_dir}/{class_folder}"):
+                if filename.endswith(".png"):
+                    match = re.findall(pattern, filename)
+                    if match:
+                        identifier = match[0]
+                        image_type = 'rgb' if 'rgb' in filename else 'dsm'
+                        images_dict[identifier][image_type] = filename
+
+            for identifier, files in images_dict.items():
+                if 'rgb' in files and 'dsm' in files:
+                    rgb_path = os.path.join(path, files['rgb'])
+                    dsm_path = os.path.join(path, files['dsm'])
+
+                    rgb_image = cv2.imread(rgb_path, cv2.IMREAD_COLOR)
+                    dsm_image = cv2.imread(dsm_path, cv2.IMREAD_GRAYSCALE)
+
+                    if rgb_image is not None and dsm_image is not None:
+                        dsm_image_resized = cv2.resize(dsm_image, (rgb_image.shape[1], rgb_image.shape[0]))
+                        combined_image = np.dstack((rgb_image, dsm_image_resized))
+                        combined_filename = f"combined_image_{identifier}.png"
+                        cv2.imwrite(os.path.join(path, combined_filename), combined_image)
+                        print(f"Saved combined image {combined_filename}")
+                        os.remove(rgb_path)
+                        os.remove(dsm_path)
+                    else:
+                        print(f"Could not load images for identifier {identifier}.")
+                else:
+                    print(f"Not all image types are available for identifier {identifier}.")
+
+# Example usage
+folder_path = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\4d_training"
+combine_and_delete_images(folder_path)
+
+###############################################3
+
+
+# %%
+with rasterio.open(r"Raw_files/Laage_vuursche/Laage_vuursche_RGB_reprojected.tif") as src:
+    rgb_img = src.read()  # This loads the multi-band image into a numpy array
+
+# Transpose the array from (bands, height, width) to (height, width, bands)
+rgb_img = np.transpose(rgb_img, (1, 2, 0))
+
+print("RGB image shape:", rgb_img.shape)
+
+import matplotlib.pyplot as plt
+#%%
+# Assuming rgb_img is already defined and loaded
+#the lower trees are within this crop
+#img_crop = rgb_img[12000:14000, 8000:12000]
+
+#these are the upper trees
+#img_crop = rgb_img[6000:10000, 14000:18000]
+
+img_crop = rgb_img[10000:13000, 11000:14000]
+# Create a single subplot
+fig, ax = plt.subplots(figsize=(50, 20))
+
+# Display the cropped image
+ax.imshow(img_crop)
+ax.axis('off')  # Hide the axes
+ax.set_title('Original')
+plt.show()  # Display the plot
+
+#%%
+# display results
+fig, axes = plt.subplots(3, 1, figsize=(50, 20), sharex=True, sharey=True)
+ax = axes.ravel()
+ax[0].imshow(rgb_img, cmap=plt.cm.gray)
+ax[0].axis('off')
+ax[0].set_title('Original')
+
+ax[1].imshow(image_max, cmap=plt.cm.gray)
+ax[1].axis('off')
+ax[1].set_title('Maximum')
+
+ax[2].imshow(image_max, cmap=plt.cm.gray)
+ax[2].autoscale(False)
+ax[2].plot(coordinates[:, 1], coordinates[:, 0], 'r.')
+ax[2].axis('off')
+ax[2].set_title('Peak local max')
+
+fig.tight_layout()
+
+plt.show()
+
+
+# %%
