@@ -1,0 +1,610 @@
+
+#%%
+from collections import defaultdict
+import tensorflow as tf
+from tensorflow.python.keras import layers, models, optimizers
+import os
+import matplotlib.pyplot as plt
+import pandas as pd
+import os
+from PIL import Image
+import numpy as np
+import matplotlib.pyplot as plt
+from keras.models import load_model
+from collections import defaultdict
+import tensorflow as tf
+from tensorflow.python.keras import layers, models, optimizers
+from keras.applications import ResNet50
+from keras.applications import MobileNetV2
+
+'''
+
+    
+    model.add(layers.Dense(1, activation='sigmoid'))  # Output layer with 1 neuron for binary classification
+    model.add(layers.Conv2D(32, (3, 3), activation='relu', input_shape=input_shape))  # Fewer filters
+    model.add(layers.MaxPooling2D((2, 2)))
+    model.add(layers.Conv2D(64, (3, 3), activation='relu'))  # Fewer filters
+    model.add(layers.MaxPooling2D((2, 2)))
+    model.add(layers.Conv2D(128, (3, 3), activation='relu'))  # Fewer filters
+    model.add(layers.MaxPooling2D((2, 2)))
+    model.add(layers.AveragePooling2D((4,4)))
+
+
+    
+    # Load the pre-trained ResNet50 model
+    base_model = ResNet50(weights='imagenet', include_top=False, input_shape=input_shape)
+    
+     # Freeze the base model
+    base_model.trainable = False
+    
+    # Create a Sequential model
+    model = models.Sequential()
+    
+    # Add the ResNet50 model at the beginning
+    model.add(base_model)
+
+    # Add a GlobalAveragePooling2D layer to reduce the dimensions after the ResNet50 model
+    model.add(layers.GlobalAveragePooling2D())
+
+    # Add additional layers
+    model.add(layers.Dense(512, activation='relu'))
+    model.add(layers.Dropout(0.5))
+    model.add(layers.Dense(1, activation='sigmoid'))  # Output layer with 1 neuron for binary classification
+
+    
+  ____________________________________________________________________________________________________  
+    model = models.Sequential()
+
+    # Convolutional layers
+    model.add(layers.Conv2D(32, (3, 3), activation='relu', input_shape=input_shape))
+    model.add(layers.MaxPooling2D((2, 2)))
+    model.add(layers.Conv2D(64, (3, 3), activation='relu'))
+    model.add(layers.MaxPooling2D((2, 2)))
+    model.add(layers.Conv2D(128, (3, 3), activation='relu'))
+    model.add(layers.MaxPooling2D((2, 2)))
+    model.add(layers.Conv2D(256, (3, 3), activation='relu'))
+    model.add(layers.AveragePooling2D((4,4)))
+
+    # Flatten layer
+    model.add(layers.Flatten())
+
+    # Dense layers
+    model.add(layers.Dense(512, activation='relu'))
+    model.add(layers.Dropout(0.5))
+
+'''
+#from 3d to 4d 
+color_mode = 'rgb'
+directory_inputdata = '\3d'
+
+#%%
+def create_model(input_shape):
+
+    model = models.Sequential()
+
+    # Convolutional layers with Batch Normalization and Dropout
+    model.add(layers.Conv2D(32, (3, 3), activation='relu', input_shape=input_shape))
+
+    model.add(layers.MaxPooling2D((2, 2)))
+    model.add(layers.Dropout(0.25))
+
+    model.add(layers.Conv2D(64, (3, 3), activation='relu'))
+
+    model.add(layers.MaxPooling2D((2, 2)))
+    model.add(layers.Dropout(0.25))
+
+    model.add(layers.Conv2D(128, (3, 3), activation='relu'))
+
+    model.add(layers.MaxPooling2D((2, 2)))
+    model.add(layers.Dropout(0.25))
+
+    model.add(layers.Conv2D(256, (3, 3), activation='relu'))
+
+    model.add(layers.AveragePooling2D((4,4)))
+    model.add(layers.Dropout(0.25))
+
+    # Flatten layer
+    model.add(layers.Flatten())
+
+    # Dense layers with Dropout
+    model.add(layers.Dense(512, activation='relu'))
+    model.add(layers.Dropout(0.5))
+
+    model.add(layers.Dense(1, activation='sigmoid'))
+
+    return model
+
+
+height = 128
+width = 128
+channels = 3
+input_shape = (height, width, channels)
+
+#%%
+# Create the model
+model = create_model(input_shape)
+
+optimizer = optimizers.adam_v2.Adam(1e-4)
+# Compile the model
+model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['accuracy'])
+
+# Display the model summary
+model.summary()
+#%%
+
+# Batch size
+batch_size = 32
+
+# Define data directories
+train_dir = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\3d_training_laage\train"
+
+# Define the size of your images
+img_height, img_width = height, width  # Replace these with the actual height and width
+
+# Create a dataset
+train_dataset = tf.keras.utils.image_dataset_from_directory(
+    train_dir,
+    labels='inferred',  
+    label_mode='int',  
+    batch_size=batch_size,
+    image_size=(img_height, img_width),
+    shuffle=True,
+    color_mode = 'rgb'
+    )   
+test_dir = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\3d_training_laage\test"
+
+# Assuming you have a test dataset
+test_dataset = tf.keras.utils.image_dataset_from_directory(
+    test_dir,  
+    label_mode='int',  # or 'binary' or 'categorical' depending on your use case
+    batch_size=batch_size,
+    image_size=(img_height, img_width),
+    shuffle=False,
+    color_mode = 'rgb'
+)
+
+
+# Define data augmentation
+data_augmentation = tf.keras.Sequential([
+    tf.keras.layers.Rescaling(1./255),  # Normalize the images
+    # tf.keras.layers.RandomRotation(0.2),  # Rotation
+    # tf.keras.layers.RandomZoom(0.2),  # Zoom
+    tf.keras.layers.RandomFlip("horizontal"),  # Horizontal flip
+    # tf.keras.layers.RandomTranslation(width_factor=0.2, height_factor=0.2)  # Width and height shift
+])
+
+scaling = tf.keras.layers.Rescaling(1./255)
+
+# Apply data augmentation to the dataset
+augmented_train_dataset = train_dataset.map(lambda x, y: (data_augmentation(x, training=True), y))
+normalized_val_dataset = test_dataset.map(lambda x, y: (scaling(x), y))
+# Train the model
+history = model.fit(augmented_train_dataset, epochs=50, validation_data=normalized_val_dataset)
+ 
+plt.figure(figsize=(10, 5))
+plt.subplot(1, 2, 1)
+plt.plot(history.history['accuracy'], label='Training Accuracy')
+plt.title('Training Accuracy')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend()
+
+# Plot training loss
+plt.subplot(1, 2, 2)
+plt.plot(history.history['loss'], label='Training Loss')
+plt.title('Training Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+
+plt.tight_layout()
+plt.show()
+
+
+
+#%%
+#Save the model
+####### CHECK DEZE!!!!!!!!!!!!!!!!!!!!!!!!!!!
+model.save(r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Models\Laage_model.keras")
+
+# %%
+test_dir = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\3d_training\test"
+
+test_dataset = tf.keras.utils.image_dataset_from_directory(
+    test_dir, 
+    label_mode='int',  
+    batch_size=batch_size,
+    image_size=(img_height, img_width),
+    shuffle=False)
+
+# Evaluate the model on the test dataset
+test_loss, test_accuracy = model.evaluate(test_dataset)
+
+print(f"Test Loss: {test_loss}")
+print(f"Test Accuracy: {test_accuracy}")
+
+#%%
+# Get class names
+class_names = test_dataset.class_names
+
+# Predict and display images with predictions
+for images, labels in test_dataset.take(1):  # Taking 1 batch; increase as needed
+    predictions = model.predict(images)
+    for i in range(len(images)):
+        plt.imshow(images[i].numpy().astype("uint8"))
+        plt.title(f"Actual: {class_names[labels[i]]}, Predicted: {class_names[int(predictions[i].round())]}")
+        plt.axis("off")
+        plt.show()
+
+
+#Real prediction time
+#%%import os
+import pandas as pd
+import os
+from PIL import Image
+import numpy as np
+import matplotlib.pyplot as plt
+from keras.models import load_model
+from collections import defaultdict
+import tensorflow as tf
+from tensorflow.python.keras import layers, models, optimizers
+
+# Load your pre-trained model
+model = load_model(r"c:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Models\RGB_en_Laage_model.keras")
+
+#%%
+
+def load_and_preprocess_image(img_path, height, width):
+    """Load an image file and prepare it for model prediction using Pillow."""
+    img = Image.open(img_path)  # Open the image file
+    img = img.resize((height, width))  # Resize the image to the target size
+    img_array = np.array(img)  # Convert the image to a numpy array
+    img_array = np.expand_dims(img_array, axis=0)  # Add batch dimension
+    return img_array
+
+def predict_folder(folder_path, height, width):
+    """Predict the class of images in a folder that have 'RGB' in their filenames."""
+    predictions = []
+    
+    for filename in os.listdir(folder_path):
+        if 'RGB' in filename or 'rgb' in filename:  # Case insensitive check
+            full_path = os.path.join(folder_path, filename)
+            img_array = load_and_preprocess_image(full_path, height, width)
+            prediction = model.predict(img_array)
+            prediction = int(prediction)  # Convert prediction to an integer (if necessary)
+            predictions.append({'Number': filename, 'Prediction': prediction})
+            print(f"File: {filename}, Predicted class: {prediction}")
+    predictions_df = pd.DataFrame(predictions)
+    return predictions_df
+#%%
+# Load the CSV file
+folder_path = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Borkel_oplaat_bomen_predict"
+predictions = predict_folder(folder_path, 128, 128)
+
+#%%
+import pandas as pd
+
+csv_path = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\output_images_Borkeloplaat_boom.csv"
+
+# Load the CSV file
+df = pd.read_csv(csv_path)
+df['Filename'] = df['Filename'].astype(str)
+# Define the full path for the filtered CSV
+filtered_csv_path = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Filtered_points_v5.csv"
+
+# Save the filtered data to a new CSV file
+#%%
+predictions['Number'] = predictions['Number'].str.replace('^bp_', '', regex=True)
+filtered = predictions[predictions['Prediction'] != 1]
+result = pd.merge(df, predictions, left_on='Filename', right_on='Number')
+#result = result.drop(['index'])
+result_filtered = result[result['Prediction'] != 1]
+result_filtered2 = result[result['Prediction'] != 0]
+
+#df = result_filtered
+#%%
+# Constants for the offset
+X_OFFSET = 4000
+Y_OFFSET = 8500
+#%%
+# Adjust the coordinates
+df['Original_X'] = df['X'] + X_OFFSET
+df['Original_Y'] = df['Y'] + Y_OFFSET
+
+#%%
+import geopandas as gpd
+from shapely.geometry import Point
+import rasterio
+import pandas as pd
+
+result_filtered['Original_X'] = result_filtered['X'] + X_OFFSET
+result_filtered['Original_Y'] = result_filtered['Y'] + Y_OFFSET
+
+# Load RGB image to determine the original dimensions, cropping offsets, and CRS
+rgb_path_for_points = "Raw_files/De_borkel_oplaat/De_borkel_oplaat_RGB.tif"
+with rasterio.open(rgb_path_for_points) as src:
+    width, height = src.width, src.height
+    crs = src.crs  # CRS from the original image
+    transform_matrix = src.transform
+
+    # Function to transform local coordinates to global coordinates
+    def transform_coordinates(row, transform):
+        global_x, global_y = rasterio.transform.xy(transform, row['Original_Y'], row['Original_X'], offset='center')
+        return pd.Series({'Global_X': global_x, 'Global_Y': global_y})
+
+    # Apply the transformation function to each row
+    transformed_coords = result_filtered.apply(transform_coordinates, axis=1, transform=transform_matrix)
+    result_filtered['Global_X'] = transformed_coords['Global_X']
+    result_filtered['Global_Y'] = transformed_coords['Global_Y']
+
+    # Create a GeoDataFrame using the global coordinates
+    gdf = gpd.GeoDataFrame(
+        result_filtered,
+        geometry=gpd.points_from_xy(result_filtered['Global_X'], result_filtered['Global_Y']),
+        crs=crs  # Use the CRS directly from the loaded RGB image
+    )
+
+    # Save the GeoDataFrame as a Shapefile and GeoJSON
+    output_path = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Processed_files"
+    gdf.to_file(f"{output_path}\output_points_borkel_boom.shp")
+    gdf.to_file(f"{output_path}\output_points_borkel_boom.geojson", driver='GeoJSON')
+
+print(f"Filtered data has been saved to {filtered_csv_path}.")
+#%%
+#Print results
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Load the CSV data into a DataFrame
+#df = pd.read_csv(r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Filtered_points.csv")
+
+# Extract coordinates into a list of tuples (X,Y)
+coordinates = list(result_filtered[['X', 'Y']].itertuples(index=False, name=None))
+
+
+# Example data
+#%%
+# Open the RGB image using rasterio
+import matplotlib.pyplot as plt
+import rasterio
+import numpy as np
+import cv2
+
+def rescale_to_255(array, min_val=None, max_val=None):
+    """Rescale the array values to the range 0-255."""
+    if min_val is None:
+        min_val = array.min()
+    if max_val is None:
+        max_val = array.max()
+    
+    scaled_array = 255 * (array - min_val) / (max_val - min_val)
+    return scaled_array.astype(np.uint8)
+
+#This cell will be the one used in the end
+#%%
+with rasterio.open("Raw_files/Laage_vuursche/Laage_vuursche_RGB_reprojected.tif") as src:
+    rgb_img = src.read()  # This loads the multi-band image into a numpy array
+
+# Transpose the array from (bands, height, width) to (height, width, bands)
+rgb_img = np.transpose(rgb_img, (1, 2, 0))
+
+print("Original RGB image shape:", rgb_img.shape)
+print("Data type:", rgb_img.dtype)
+print("Min and Max values before scaling:", rgb_img.min(), rgb_img.max())
+
+# Rescale each band to 0-255 if necessary
+if rgb_img.dtype != np.uint8 or rgb_img.min() < 0 or rgb_img.max() > 255:
+    rgb_img = np.stack([rescale_to_255(rgb_img[:, :, i]) for i in range(rgb_img.shape[2])], axis=2)
+
+img_crop = rgb_img[10000:13000, 11000:14000]
+
+# Load DSM image and normalize
+dsm_img = cv2.imread("Raw_files/Laage_vuursche/Laage_vuursche_dsm.tif", -1)
+dsm_img[dsm_img == -10000] = dsm_img[dsm_img != -10000].min()
+min_val = dsm_img.min()
+max_val = dsm_img.max()
+dsm_img_norm = (dsm_img - min_val) / (max_val - min_val) * 2**16 - 1
+dsm_img_norm = dsm_img_norm.astype(np.uint16)
+dsm_img_norm = dsm_img_norm[10000:13000, 11000:14000]
+
+
+#%%
+
+cv2.imshow("", img_crop)
+cv2.waitKey(0)
+#%%
+
+# Plotting the results
+fig, axes = plt.subplots(3, 1, figsize=(20, 30), sharex=True, sharey=True)
+ax = axes.ravel()
+
+# Original RGB image
+ax[0].imshow(img_crop)
+ax[0].axis('off')
+ax[0].set_title('Original RGB Image')
+
+# DSM image with detected peaks
+ax[1].imshow(img_crop, cmap=plt.cm.gray)
+ax[1].autoscale(False)
+ax[1].scatter(result['X'], result['Y'], c='red', s=10)  # Original points
+ax[1].axis('off')
+ax[1].set_title('Original Detected Peaks on DSM Image')
+
+# RGB image with filtered peaks
+ax[2].imshow(img_crop)
+ax[2].autoscale(False)
+ax[2].scatter(result_filtered['X'], result_filtered['Y'], c='red', s=10)  # Filtered points
+ax[2].axis('off')
+ax[2].set_title('Filtered Peaks on RGB Image')
+
+fig.tight_layout()
+plt.show()
+
+
+#%%
+#what are the images that are predicted to have a tree 
+
+# Load your dataframe
+# Assuming the dataframe is loaded from a CSV or similar
+df = result_filtered
+
+# Define the directory where the images are stored
+image_folder_path = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\To_be_predicted"
+
+# Loop through the dataframe and display each image mentioned in the 'Filename' column
+for index, row in df.iterrows():
+    image_path = os.path.join(image_folder_path, row['Filename'])
+    if os.path.exists(image_path):  # Check if the image file exists
+        img = Image.open(image_path)
+        plt.imshow(img)
+        plt.title(row['Filename'])
+        plt.axis('off')
+        plt.show()
+    else:
+        print(f"Image {row['Filename']} not found.")
+
+#%%
+
+####################
+#TEST SECTION
+directory = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Training_data_4channel"
+
+for filename in os.listdir(directory):
+    if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')) and not filename.endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
+        base_file, ext = os.path.splitext(filename)
+        new_filename = base_file + ext.lower()
+        os.rename(os.path.join(directory, filename), os.path.join(directory, new_filename))
+
+# %%
+
+train_dir = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Training_data_4channel"
+
+train_dataset = tf.keras.utils.image_dataset_from_directory(
+    train_dir,
+    label_mode='int',
+    batch_size=batch_size,
+    image_size=(img_height, img_width),
+    shuffle=True
+)
+
+print("Number of batches in the dataset:", len(train_dataset))
+
+#%%
+import os
+import shutil
+from tqdm import tqdm
+import re
+# self_written
+def populate_dict(folder, class_dict):
+    for sub in ["train", "test"]:
+        for class_folder in ["class_1", "class_2"]:
+            path = os.path.join(folder, sub, class_folder)
+            for filename in tqdm(os.listdir(path), desc=f"Processing {sub}/{class_folder}"):
+                if filename.endswith(".png") and filename.startswith("New"):
+                    match = re.findall(pattern, filename)
+                    if match:
+                        identifier = match[0]
+                        class_dict[identifier] = (sub, class_folder)
+    return class_dict
+
+def copy_files(source, target, class_dict):
+    for filename in tqdm(os.listdir(source), desc="Copying files"):
+        if filename.endswith(".png"):
+            match = re.findall(pattern, filename)
+            if match:
+                identifier = match[0]
+                if identifier in class_dict:
+                    sub_dir, class_folder = class_dict[identifier]
+                    dest_subfolder_path = os.path.join(target, sub_dir, class_folder)
+                    src_path = os.path.join(source, filename)
+                    dest_path = os.path.join(dest_subfolder_path, filename)
+                    shutil.copy(src_path, dest_path)
+
+
+files_dict = {}
+
+populate_dir = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\3d_training"
+source_dir = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\rgb_dsm"
+target_dir = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\4d_training"
+
+populate_dict(populate_dir, files_dict)
+copy_files(source_dir, target_dir, files_dict)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#%%
+#NIET ZOMAAR RUNNEN
+import re
+import os
+
+train_dir = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Training_data_4channel"
+
+test_dir = r"C:\Users\WitteVerheul\Desktop\Peak_maximum_dataset\Test_Set"
+
+pattern = r"\d+"
+
+class1_dict = {}
+class2_dict = {}
+
+def regex_checker (dir, class_1_2, class_dict):
+    for filename in os.listdir(os.path.join(dir, class_1_2)):
+        if filename.endswith(".png"):
+            matches = re.findall(pattern, filename)
+            if matches:  
+                class_dict[filename] = matches
+    return class_dict
+
+def filename_in_dict_values(filename, dictionary):
+    num = re.findall(pattern, filename)
+    print(int(num))
+    for value_list in dictionary.values():
+        if num in value_list:
+            return True
+    return False
+
+def remover(dir, class_1_2, class_dict):
+    x = os.path.join(dir, class_1_2)
+    for filename in os.listdir(x):
+        if filename.endswith(".png"):
+            if filename_in_dict_values(filename, class_dict):
+                os.remove(os.path.join(x, filename))
+                print("Removed")
+
+def folder_checker(folder):
+    train_class_1_dict = {}
+    train_class_2_dict = {}
+    test_class_1_dict = {}
+    test_class_2_dict = {}
+
+    traindir = os.path.join(folder, "train")
+    testdir = os.path.join(folder, "test")
+
+    train_class_1_dict = regex_checker(traindir, "class_1", train_class_1_dict)
+    train_class_2_dict = regex_checker(traindir, "class_2", train_class_2_dict)
+    test_class_1_dict = regex_checker(testdir, "class_1", test_class_1_dict)
+    test_class_2_dict = regex_checker(testdir, "class_2", test_class_2_dict)
+
+
+
+
+
+
+
+class1_dict = regex_checker(test_dir, "class_1")
+class2_dict = regex_checker(test_dir, "class_2")
+
+# %%
+#to do 
+# Get the prediction for the 
